@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Пульс продаж — SINANA{% endblock %}
+{% block content %}
+<div class="heading"><div><small>ПАНЕЛЬ РУКОВОДИТЕЛЯ</small><h1>Пульс продаж</h1></div><a class="button" href="{{ url_for('main.team') }}">Сотрудники</a></div>
+<section class="metrics">
+  <article><span>Продажи месяца</span><strong>{{ '{:,.0f}'.format(sales).replace(',', ' ') }} ₽</strong><small>{{ orders|length }} заказов</small></article>
+  <article><span>Активные точки</span><strong>{{ active_customers }}</strong><small>клиентов в работе</small></article>
+  <article><span>Визиты сегодня</span><strong>{{ today_visits|length }}</strong><small>{{ today_visits|selectattr('status','equalto','completed')|list|length }} завершено</small></article>
+  <article><span>Дебиторка</span><strong>{{ '{:,.0f}'.format(debt).replace(',', ' ') }} ₽</strong><small>требует контроля</small></article>
+</section>
+<section class="card"><div class="heading"><div><small>КОМАНДА</small><h2>Торговые представители</h2></div></div>
+  <div class="people">{% for rep in representatives %}<a href="{{ url_for('main.mobile', rep_id=rep.id) }}"><span>{{ rep.full_name[:2]|upper }}</span><div><b>{{ rep.full_name }}</b><small>Открыть маршрут</small></div></a>{% else %}<p>Добавьте первого торгового представителя.</p>{% endfor %}</div>
+</section>
+{% endblock %}
+

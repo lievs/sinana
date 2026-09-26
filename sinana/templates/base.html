@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}SINANA{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('static', filename='brand/sinana-monogram.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+{% if current_user.is_authenticated %}
+<header class="topbar">
+  <a class="brand" href="{{ url_for('main.dashboard' if current_user.is_manager else 'main.mobile') }}">
+    <img src="{{ url_for('static', filename='brand/sinana-monogram.png') }}" alt=""><img class="wordmark" src="{{ url_for('static', filename='brand/sinana-wordmark.png') }}" alt="SINANA">
+  </a>
+  <nav>
+    {% if current_user.is_manager %}<a href="{{ url_for('main.dashboard') }}">Пульс продаж</a><a href="{{ url_for('main.team') }}">Сотрудники</a>{% endif %}
+    <a href="{{ url_for('main.mobile') }}">Маршрут</a>
+    <form method="post" action="{{ url_for('auth.logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button>Выйти</button></form>
+  </nav>
+</header>
+{% endif %}
+<main class="page">
+  {% for category, message in get_flashed_messages(with_categories=true) %}<div class="alert {{ category }}">{{ message }}</div>{% endfor %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>
+

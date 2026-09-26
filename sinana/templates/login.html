@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Вход — SINANA{% endblock %}
+{% block content %}
+<section class="login-card">
+  <div class="login-brand"><img src="{{ url_for('static', filename='brand/sinana-monogram.png') }}" alt=""><img src="{{ url_for('static', filename='brand/sinana-wordmark.png') }}" alt="SINANA"></div>
+  <p>Система управления продажами</p>
+  <form method="post" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Логин<input name="username" autocomplete="username" required autofocus></label>
+    <label>Пароль<input type="password" name="password" autocomplete="current-password" required></label>
+    <button class="primary">Войти</button>
+  </form>
+</section>
+{% endblock %}
+
