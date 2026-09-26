@@ -29,7 +29,7 @@ def test_roles_have_different_start_pages(tmp_path):
     response = client.post("/login", data={"username": "boss", "password": "password123", "csrf_token": token})
     assert response.headers["Location"].endswith("/")
     client.post("/logout", data={"csrf_token": token})
+    token = csrf(client)
     response = client.post("/login", data={"username": "rep", "password": "password123", "csrf_token": token})
     assert response.headers["Location"].endswith("/mobile")
     assert client.get("/team").status_code == 403
-

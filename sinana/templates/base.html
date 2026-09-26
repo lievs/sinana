@@ -14,7 +14,7 @@
     <img src="{{ url_for('static', filename='brand/sinana-monogram.png') }}" alt=""><img class="wordmark" src="{{ url_for('static', filename='brand/sinana-wordmark.png') }}" alt="SINANA">
   </a>
   <nav>
-    {% if current_user.is_manager %}<a href="{{ url_for('main.dashboard') }}">Пульс продаж</a><a href="{{ url_for('main.team') }}">Сотрудники</a>{% endif %}
+    {% if current_user.is_manager %}<a href="{{ url_for('main.dashboard') }}">Пульс</a><a href="{{ url_for('main.orders') }}">Заказы</a><a href="{{ url_for('main.customers') }}">Точки</a><a href="{{ url_for('main.routes') }}">Маршруты</a><a href="{{ url_for('main.tracking') }}">GPS</a><a href="{{ url_for('main.products') }}">Товары</a><a href="{{ url_for('main.team') }}">Сотрудники</a><a href="{{ url_for('main.settings') }}">Настройки</a>{% endif %}
     <a href="{{ url_for('main.mobile') }}">Маршрут</a>
     <form method="post" action="{{ url_for('auth.logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button>Выйти</button></form>
   </nav>
@@ -26,4 +26,3 @@
 </main>
 </body>
 </html>
-

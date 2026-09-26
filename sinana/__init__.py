@@ -20,6 +20,9 @@ def create_app(test_config=None):
             f"sqlite:///{Path(app.instance_path) / 'sinana.db'}",
         ),
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        MAX_CONTENT_LENGTH=12 * 1024 * 1024,
+        UPLOAD_FOLDER=str(Path(app.instance_path) / "uploads"),
+        ONE_C_API_TOKEN=os.getenv("SINANA_1C_API_TOKEN", ""),
     )
     if test_config:
         app.config.update(test_config)
@@ -30,10 +33,12 @@ def create_app(test_config=None):
     login_manager.login_message = "Войдите в приложение"
 
     from .models import User
-    from .routes import auth, main
+    from .routes import api, auth, main
 
     app.register_blueprint(auth)
     app.register_blueprint(main)
+    app.register_blueprint(api, url_prefix="/api/1c")
+    Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
 
     @login_manager.user_loader
     def load_user(user_id):
@@ -41,7 +46,7 @@ def create_app(test_config=None):
 
     @app.before_request
     def protect_roles_and_csrf():
-        if request.method == "POST":
+        if request.method == "POST" and not (request.endpoint or "").startswith("api."):
             expected = session.get("csrf_token")
             supplied = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
             if not expected or not secrets.compare_digest(expected, supplied or ""):
