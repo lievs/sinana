@@ -1,0 +1,13 @@
+{
+  "name": "SINANA — управление продажами",
+  "short_name": "SINANA",
+  "description": "Продажи, маршруты и работа торговых представителей SINANA",
+  "start_url": "/login",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f2ec",
+  "theme_color": "#12201d",
+  "icons": [
+    {"src": "/static/brand/sinana-monogram.png", "sizes": "any", "type": "image/png", "purpose": "any maskable"}
+  ]
+}

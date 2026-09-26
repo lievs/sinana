@@ -1,6 +1,6 @@
 import math
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from uuid import uuid4
@@ -82,6 +82,14 @@ def can_manage_visit(visit):
     return current_user.is_manager or visit.representative_id == current_user.id
 
 
+@main.route("/sw.js")
+def service_worker():
+    response = send_from_directory(current_app.static_folder, "sw.js")
+    response.headers["Service-Worker-Allowed"] = "/"
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @auth.route("/login", methods=["GET", "POST"])
 def login():
     if current_user.is_authenticated:
@@ -113,15 +121,31 @@ def dashboard():
         return redirect(url_for("main.mobile"))
     start = datetime.combine(date.today().replace(day=1), datetime.min.time())
     orders = Order.query.filter(Order.created_at >= start, Order.status != "cancelled").all()
+    sales = sum(float(order.total_amount or 0) for order in orders)
+    monthly_plan = float(setting("monthly_sales_plan", "1000000") or 1000000)
+    plan_percent = round(min(sales / monthly_plan * 100, 999), 1) if monthly_plan else 0
+    today = date.today()
+    chart_values = []
+    for offset in range(4, -1, -1):
+        period_end = datetime.combine(today, datetime.max.time())
+        period_start = period_end.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=offset * 7 + 6)
+        period_finish = period_start + timedelta(days=7)
+        chart_values.append(sum(float(order.total_amount or 0) for order in orders if period_start <= order.created_at < period_finish))
+    chart_max = max(chart_values + [monthly_plan / 4 if monthly_plan else 1, 1])
+    chart_points = " ".join(f"{40 + index * 155},{190 - value / chart_max * 145:.1f}" for index, value in enumerate(chart_values))
     return render_template(
         "dashboard.html",
-        sales=sum(float(order.total_amount or 0) for order in orders),
+        sales=sales,
         orders=orders,
         active_customers=Customer.query.filter_by(is_active=True).count(),
         debt=db.session.query(func.coalesce(func.sum(Customer.debt), 0)).scalar(),
         today_visits=Visit.query.filter_by(visit_date=date.today()).all(),
         representatives=User.query.filter_by(role="representative", is_active_user=True).all(),
         unsynced_orders=Order.query.filter(Order.synced_at.is_(None), Order.status != "cancelled").count(),
+        monthly_plan=monthly_plan,
+        plan_percent=plan_percent,
+        chart_values=chart_values,
+        chart_points=chart_points,
     )
 
 
@@ -477,13 +501,18 @@ def products():
 @manager_required
 def settings():
     if request.method == "POST":
-        row = db.session.get(Setting, "photo_required") or Setting(key="photo_required")
-        row.value = "1" if request.form.get("photo_required") else "0"
-        db.session.add(row)
+        values = {
+            "photo_required": "1" if request.form.get("photo_required") else "0",
+            "monthly_sales_plan": str(max(decimal_value(request.form.get("monthly_sales_plan")), 0)),
+        }
+        for key, value in values.items():
+            row = db.session.get(Setting, key) or Setting(key=key)
+            row.value = value
+            db.session.add(row)
         db.session.commit()
         flash("Настройки сохранены", "success")
         return redirect(url_for("main.settings"))
-    return render_template("settings.html", photo_required=bool_setting("photo_required", True), api_configured=bool(current_app.config.get("ONE_C_API_TOKEN")))
+    return render_template("settings.html", photo_required=bool_setting("photo_required", True), monthly_sales_plan=setting("monthly_sales_plan", "1000000"), api_configured=bool(current_app.config.get("ONE_C_API_TOKEN")))
 
 
 def order_payload(order):
