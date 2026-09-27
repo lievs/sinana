@@ -40,7 +40,8 @@ def _upgrade_schema():
             existing = {column["name"] for column in inspector.get_columns(table_name)}
             for name, definition in columns.items():
                 if name not in existing:
-                    connection.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{name}" {definition}'))
+                    clause = "IF NOT EXISTS " if db.engine.dialect.name == "postgresql" else ""
+                    connection.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN {clause}"{name}" {definition}'))
 
 
 def create_app(test_config=None):
