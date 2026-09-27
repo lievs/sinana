@@ -1,1 +1,25 @@
-{% extends "base.html" %}{% block title %}Контрагенты — SINANA{% endblock %}{% block content %}<div class="heading"><div><small>СПРАВОЧНИК</small><h1>Контрагенты</h1></div></div><section class="split"><article class="card"><h2>Новый контрагент</h2><form method="post" class="stack"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Наименование<input name="name" required></label><label>ИНН<input name="tax_id"></label><label>Телефон<input name="phone"></label><label>Тип цен<select name="price_type_id"><option value="">Базовая цена</option>{% for row in price_types %}<option value="{{ row.id }}">{{ row.name }}</option>{% endfor %}</select></label><button class="primary">Добавить</button></form></article><article class="card table-wrap"><table><thead><tr><th>Контрагент</th><th>ИНН</th><th>Тип цен</th><th>Долг</th></tr></thead><tbody>{% for row in counterparties %}<tr><td><b>{{ row.name }}</b><small>{{ row.phone or '' }}</small></td><td>{{ row.tax_id or '—' }}</td><td>{{ row.price_type.name if row.price_type else 'Базовая' }}</td><td>{{ row.debt }} ₽</td></tr>{% else %}<tr><td colspan="4">Справочник пуст.</td></tr>{% endfor %}</tbody></table></article></section>{% endblock %}
+{% extends "base.html" %}
+{% block title %}Дебиторка и контрагенты — SINANA{% endblock %}
+{% block content %}
+<div class="heading"><div><small>СПРАВОЧНИК И ДЕБИТОРКА</small><h1>Контрагенты</h1><p>Условия оплаты и тип цен применяются при создании заказа.</p></div></div>
+<section class="split counterparties-layout">
+  <article class="card">
+    <h2>Новый контрагент</h2>
+    <form method="post" class="stack"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Наименование<input name="name" required></label><label>ИНН<input name="tax_id"></label><label>Телефон<input name="phone"></label><label>Тип цен<select name="price_type_id"><option value="">Базовая цена</option>{% for row in price_types %}<option value="{{ row.id }}">{{ row.name }}</option>{% endfor %}</select></label><label>Отсрочка оплаты, дней<input type="number" name="payment_terms_days" min="0" step="1" value="0"><small>0 — оплата без отсрочки.</small></label><button class="primary">Добавить</button></form>
+  </article>
+  <article class="card">
+    <h2>Оплата и возврат денег</h2>
+    <form method="post" action="{{ url_for('main.counterparty_transaction') }}" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Клиент<select name="counterparty_id" required>{% for row in counterparties %}<option value="{{ row.id }}">{{ row.name }} · долг {{ row.debt }} ₽</option>{% endfor %}</select></label>
+      <label>Операция<select name="transaction_type"><option value="payment">Получена оплата от клиента</option><option value="refund">Возвращены деньги клиенту</option></select></label>
+      <label>Сумма, ₽<input type="number" name="amount" min="0.01" step="0.01" required></label>
+      <label>Дата<input type="date" name="transaction_date" value="{{ now_date }}" required></label>
+      <label>Комментарий<input name="note" placeholder="Номер платежа или основание"></label>
+      <button class="primary">Зафиксировать</button>
+    </form>
+  </article>
+</section>
+<section class="card table-wrap"><h2>Клиенты и условия</h2><table><thead><tr><th>Контрагент</th><th>Долг</th><th>Условия клиента</th></tr></thead><tbody>{% for row in counterparties %}<tr><td><b>{{ row.name }}</b><small>{{ row.tax_id or 'ИНН не указан' }}{% if row.phone %} · {{ row.phone }}{% endif %}</small></td><td><b class="{{ 'debt-credit' if row.debt < 0 else '' }}">{{ row.debt }} ₽</b>{% if row.debt < 0 %}<small>аванс клиента</small>{% endif %}</td><td><form method="post" action="{{ url_for('main.counterparty_terms', counterparty_id=row.id) }}" class="client-terms"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><select name="price_type_id" aria-label="Тип цен"><option value="">Базовая цена</option>{% for price_type in price_types %}<option value="{{ price_type.id }}" {% if row.price_type_id == price_type.id %}selected{% endif %}>{{ price_type.name }}</option>{% endfor %}</select><label><span>Отсрочка</span><input type="number" name="payment_terms_days" min="0" step="1" value="{{ row.payment_terms_days or 0 }}"><span>дн.</span></label><button>Сохранить</button></form></td></tr>{% else %}<tr><td colspan="3">Справочник пуст.</td></tr>{% endfor %}</tbody></table></section>
+<section class="card table-wrap"><h2>Последние операции</h2><table><thead><tr><th>Дата</th><th>Клиент</th><th>Операция</th><th>Сумма</th><th>Долг после операции</th><th>Комментарий</th></tr></thead><tbody>{% for row in transactions %}<tr><td>{{ row.transaction_date.strftime('%d.%m.%Y') }}</td><td>{{ row.counterparty.name }}</td><td>{{ 'Оплата клиента' if row.transaction_type == 'payment' else 'Возврат клиенту' }}</td><td>{{ row.amount }} ₽</td><td>{{ row.balance_after }} ₽</td><td>{{ row.note or '—' }}<small>{{ row.created_by.full_name }}</small></td></tr>{% else %}<tr><td colspan="6">Платежей и возвратов пока нет.</td></tr>{% endfor %}</tbody></table></section>
+{% endblock %}

@@ -1,3 +1,30 @@
-{% extends "base.html" %}{% block title %}Номенклатура — SINANA{% endblock %}{% block content %}
-<div class="heading"><div><small>ТОВАРЫ И ОСТАТКИ</small><h1>Номенклатура</h1></div></div><section class="card import-box"><div><h2>Загрузка из Excel</h2><p>Колонки: <b>Штрихкод</b>, <b>Наименование</b>; дополнительно Цена, Себестоимость, Единица и Тип.</p></div><form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="file" name="file" accept=".xlsx" required><button class="primary">Загрузить</button></form></section>{% if last_sync %}<p class="sync-note">Последний обмен: {{ last_sync.source }} · {{ last_sync.items_count }} позиций · {{ last_sync.created_at.strftime('%d.%m.%Y %H:%M') }}</p>{% endif %}<section class="card table-wrap"><table><thead><tr><th>Штрихкод</th><th>Наименование</th><th>Тип</th><th>Цена</th><th>Себестоимость</th><th>Остаток</th></tr></thead><tbody>{% for product in products %}<tr><td>{{ product.barcode }}</td><td>{{ product.name }}<small>{{ product.unit }}{% if product.shelf_life_days %} · {{ product.shelf_life_days }} дней{% endif %}</small></td><td>{{ product.product_type }}</td><td>{{ product.price }} ₽</td><td>{{ product.calculated_cost }} ₽</td><td><b>{{ product.stock_qty }}</b> {{ product.unit }}</td></tr>{% else %}<tr><td colspan="6">Загрузите номенклатуру из Excel или синхронизируйте группу из 1С.</td></tr>{% endfor %}</tbody></table></section>
+{% extends "base.html" %}
+{% block title %}Номенклатура — SINANA{% endblock %}
+{% block content %}
+<div class="heading"><div><small>ТОВАРЫ И ОСТАТКИ</small><h1>Номенклатура</h1></div></div>
+<section class="split catalog-actions">
+  <article class="card">
+    <h2>Добавить вручную</h2>
+    <form method="post" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="action" value="manual">
+      <label>Штрихкод<input name="barcode" inputmode="numeric" required></label>
+      <label>Наименование<input name="name" required></label>
+      <div class="form-grid">
+        <label>Единица<input name="unit" value="шт" required></label>
+        <label>Тип<select name="product_type"><option value="finished">Готовая продукция</option><option value="raw">Сырьё</option><option value="semi_finished">Полуфабрикат</option><option value="packaging">Упаковка</option></select></label>
+        <label>Цена, ₽<input type="number" name="price" min="0" step="0.01" value="0"></label>
+        <label>Себестоимость, ₽<input type="number" name="calculated_cost" min="0" step="0.0001" value="0"></label>
+        <label>Срок годности, дней<input type="number" name="shelf_life_days" min="0" step="1"></label>
+      </div>
+      <button class="primary">Добавить товар</button>
+    </form>
+  </article>
+  <article class="card import-box">
+    <div><h2>Загрузка из Excel</h2><p>Колонки: <b>Штрихкод</b>, <b>Наименование</b>; дополнительно Цена, Себестоимость, Единица и Тип.</p></div>
+    <form method="post" enctype="multipart/form-data" class="stack"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="file" name="file" accept=".xlsx" required><button class="primary">Загрузить</button></form>
+  </article>
+</section>
+{% if last_sync %}<p class="sync-note">Последний обмен: {{ last_sync.source }} · {{ last_sync.items_count }} позиций · {{ last_sync.created_at.strftime('%d.%m.%Y %H:%M') }}</p>{% endif %}
+<section class="card table-wrap"><table><thead><tr><th>Штрихкод</th><th>Наименование</th><th>Тип</th><th>Цена</th><th>Себестоимость</th><th>Остаток</th></tr></thead><tbody>{% for product in products %}<tr><td>{{ product.barcode }}</td><td>{{ product.name }}<small>{{ product.unit }}{% if product.shelf_life_days %} · {{ product.shelf_life_days }} дней{% endif %}</small></td><td>{{ product.product_type }}</td><td>{{ product.price }} ₽</td><td>{{ product.calculated_cost }} ₽</td><td><b>{{ product.stock_qty }}</b> {{ product.unit }}</td></tr>{% else %}<tr><td colspan="6">Добавьте номенклатуру вручную, загрузите Excel или синхронизируйте группу из 1С.</td></tr>{% endfor %}</tbody></table></section>
 {% endblock %}

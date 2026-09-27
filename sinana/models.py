@@ -152,9 +152,24 @@ class Counterparty(db.Model):
     phone = db.Column(db.String(80))
     email = db.Column(db.String(160))
     price_type_id = db.Column(db.Integer, db.ForeignKey("price_type.id"), index=True)
+    payment_terms_days = db.Column(db.Integer, nullable=False, default=0)
     debt = db.Column(db.Numeric(14, 2), nullable=False, default=0)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     price_type = db.relationship("PriceType")
+
+
+class ReceivableTransaction(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    counterparty_id = db.Column(db.Integer, db.ForeignKey("counterparty.id"), nullable=False, index=True)
+    transaction_type = db.Column(db.String(24), nullable=False, index=True)
+    amount = db.Column(db.Numeric(14, 2), nullable=False)
+    transaction_date = db.Column(db.Date, nullable=False, default=date.today, index=True)
+    note = db.Column(db.String(500))
+    balance_after = db.Column(db.Numeric(14, 2), nullable=False)
+    created_by_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    counterparty = db.relationship("Counterparty")
+    created_by = db.relationship("User")
 
 
 class Warehouse(db.Model):

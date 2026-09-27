@@ -30,7 +30,7 @@
 
 ## Контрагенты и склады
 
-- `POST /api/1c/counterparties` — реквизиты, контакты и задолженность.
+- `POST /api/1c/counterparties` — реквизиты, контакты, задолженность и отсрочка в поле `payment_terms_days`.
 - `POST /api/1c/warehouses` — склады из 1С.
 - `POST /api/1c/prices` — типы цен и цены товаров. В контрагенте поле `price_type_external_id` связывает его с нужным типом.
 

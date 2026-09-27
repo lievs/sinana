@@ -11,10 +11,8 @@ db = SQLAlchemy()
 login_manager = LoginManager()
 
 
-def _upgrade_local_sqlite_schema():
-    """Keep the local test database usable while the project is pre-deployment."""
-    if db.engine.dialect.name != "sqlite":
-        return
+def _upgrade_schema():
+    """Add small backwards-compatible columns without requiring a migration service."""
     additions = {
         "customer": {"counterparty_id": "INTEGER"},
         "product": {
@@ -27,6 +25,7 @@ def _upgrade_local_sqlite_schema():
             "calculated_cost": "NUMERIC(14,4) NOT NULL DEFAULT 0",
         },
         "production_order": {"source_warehouse_id": "INTEGER"},
+        "counterparty": {"payment_terms_days": "INTEGER NOT NULL DEFAULT 0"},
     }
     inspector = inspect(db.engine)
     with db.engine.begin() as connection:
@@ -126,5 +125,5 @@ def create_app(test_config=None):
 
     with app.app_context():
         db.create_all()
-        _upgrade_local_sqlite_schema()
+        _upgrade_schema()
     return app

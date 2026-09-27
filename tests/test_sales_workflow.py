@@ -4,7 +4,7 @@ from io import BytesIO
 from openpyxl import Workbook
 
 from sinana import create_app, db
-from sinana.models import Counterparty, Customer, Order, Product, ProductionOrder, Recipe, RecipeItem, Setting, StockBalance, User, Visit, Warehouse
+from sinana.models import Counterparty, Customer, Order, PriceType, Product, ProductionOrder, ReceivableTransaction, Recipe, RecipeItem, Setting, StockBalance, User, Visit, Warehouse
 
 
 def make_app(tmp_path):
@@ -151,3 +151,63 @@ def test_production_uses_recipe_cost_and_moves_stock(tmp_path):
         assert float(production.actual_cost) == 7.7
         assert float(StockBalance.query.join(Product).filter(Product.barcode == "RAW").one().quantity) == 95
         assert float(StockBalance.query.join(Product).filter(Product.barcode == "CAKE").one().quantity) == 10
+
+
+def test_manual_product_and_counterparty_receivables(tmp_path):
+    app = make_app(tmp_path)
+    seed(app)
+    client = app.test_client()
+    login(client, "boss")
+    response = client.post("/products", data={
+        "csrf_token": "token",
+        "action": "manual",
+        "barcode": "460999",
+        "name": "Торт вручную",
+        "unit": "шт",
+        "product_type": "finished",
+        "price": "1500",
+        "calculated_cost": "700",
+        "shelf_life_days": "5",
+    })
+    assert response.status_code == 302
+    with app.app_context():
+        price_type = PriceType(name="Оптовая")
+        db.session.add(price_type)
+        db.session.commit()
+        price_type_id = price_type.id
+        assert Product.query.filter_by(barcode="460999").one().name == "Торт вручную"
+    response = client.post("/counterparties", data={
+        "csrf_token": "token",
+        "name": "Клиент с отсрочкой",
+        "price_type_id": str(price_type_id),
+        "payment_terms_days": "14",
+    })
+    assert response.status_code == 302
+    with app.app_context():
+        counterparty = Counterparty.query.filter_by(name="Клиент с отсрочкой").one()
+        counterparty.debt = 1000
+        db.session.commit()
+        counterparty_id = counterparty.id
+    response = client.post("/counterparties/transactions", data={
+        "csrf_token": "token",
+        "counterparty_id": str(counterparty_id),
+        "transaction_type": "payment",
+        "amount": "600",
+        "transaction_date": date.today().isoformat(),
+        "note": "Платёжное поручение 1",
+    })
+    assert response.status_code == 302
+    response = client.post("/counterparties/transactions", data={
+        "csrf_token": "token",
+        "counterparty_id": str(counterparty_id),
+        "transaction_type": "refund",
+        "amount": "100",
+        "transaction_date": date.today().isoformat(),
+    })
+    assert response.status_code == 302
+    with app.app_context():
+        counterparty = db.session.get(Counterparty, counterparty_id)
+        assert counterparty.payment_terms_days == 14
+        assert counterparty.price_type_id == price_type_id
+        assert float(counterparty.debt) == 500
+        assert ReceivableTransaction.query.count() == 2

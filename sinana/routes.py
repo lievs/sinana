@@ -23,6 +23,7 @@ from .models import (
     Product,
     ProductPrice,
     ProductionOrder,
+    ReceivableTransaction,
     Recipe,
     RecipeItem,
     SalesReturn,
@@ -159,7 +160,7 @@ def dashboard():
         sales=sales,
         orders=orders,
         active_customers=Customer.query.filter_by(is_active=True).count(),
-        debt=db.session.query(func.coalesce(func.sum(Customer.debt), 0)).scalar(),
+        debt=db.session.query(func.coalesce(func.sum(Counterparty.debt), 0)).scalar(),
         today_visits=Visit.query.filter_by(visit_date=date.today()).all(),
         representatives=User.query.filter_by(role="representative", is_active_user=True).all(),
         unsynced_orders=Order.query.filter(Order.synced_at.is_(None), Order.status != "cancelled").count(),
@@ -490,6 +491,31 @@ def tracking():
 @manager_required
 def products():
     if request.method == "POST":
+        if request.form.get("action") == "manual":
+            barcode = barcode_value(request.form.get("barcode"))
+            name = (request.form.get("name") or "").strip()
+            if not barcode or not name:
+                flash("Укажите штрихкод и наименование", "danger")
+            elif Product.query.filter_by(barcode=barcode).first():
+                flash("Товар с таким штрихкодом уже существует", "danger")
+            else:
+                product_type = request.form.get("product_type") or "finished"
+                if product_type not in {"raw", "semi_finished", "finished", "packaging"}:
+                    product_type = "finished"
+                product = Product(
+                    barcode=barcode,
+                    name=name,
+                    product_type=product_type,
+                    unit=(request.form.get("unit") or "шт").strip(),
+                    shelf_life_days=max(request.form.get("shelf_life_days", type=int) or 0, 0) or None,
+                    price=max(decimal_value(request.form.get("price")), 0),
+                    calculated_cost=max(decimal_value(request.form.get("calculated_cost")), 0),
+                    external_group_id=setting("one_c_product_group_id") or None,
+                )
+                db.session.add(product)
+                db.session.commit()
+                flash("Номенклатура добавлена", "success")
+            return redirect(url_for("main.products"))
         uploaded = request.files.get("file")
         if not uploaded or not uploaded.filename.lower().endswith(".xlsx"):
             flash("Выберите файл Excel в формате .xlsx", "danger")
@@ -594,11 +620,64 @@ def counterparties():
         if not name:
             flash("Укажите наименование контрагента", "danger")
         else:
-            db.session.add(Counterparty(name=name, tax_id=(request.form.get("tax_id") or "").strip() or None, phone=(request.form.get("phone") or "").strip() or None, price_type_id=request.form.get("price_type_id", type=int)))
+            db.session.add(Counterparty(
+                name=name,
+                tax_id=(request.form.get("tax_id") or "").strip() or None,
+                phone=(request.form.get("phone") or "").strip() or None,
+                price_type_id=request.form.get("price_type_id", type=int),
+                payment_terms_days=max(request.form.get("payment_terms_days", type=int) or 0, 0),
+            ))
             db.session.commit()
             flash("Контрагент добавлен", "success")
         return redirect(url_for("main.counterparties"))
-    return render_template("counterparties.html", counterparties=Counterparty.query.order_by(Counterparty.name).all(), price_types=price_types)
+    return render_template(
+        "counterparties.html",
+        counterparties=Counterparty.query.order_by(Counterparty.name).all(),
+        price_types=price_types,
+        transactions=ReceivableTransaction.query.order_by(ReceivableTransaction.transaction_date.desc(), ReceivableTransaction.id.desc()).limit(100).all(),
+        now_date=date.today().isoformat(),
+    )
+
+
+@main.route("/counterparties/<int:counterparty_id>/terms", methods=["POST"])
+@manager_required
+def counterparty_terms(counterparty_id):
+    counterparty = db.get_or_404(Counterparty, counterparty_id)
+    price_type_id = request.form.get("price_type_id", type=int)
+    if price_type_id and not db.session.get(PriceType, price_type_id):
+        abort(400, "Неизвестный тип цен")
+    counterparty.price_type_id = price_type_id
+    counterparty.payment_terms_days = max(request.form.get("payment_terms_days", type=int) or 0, 0)
+    db.session.commit()
+    flash("Условия оплаты и тип цен сохранены", "success")
+    return redirect(url_for("main.counterparties"))
+
+
+@main.route("/counterparties/transactions", methods=["POST"])
+@manager_required
+def counterparty_transaction():
+    counterparty = db.get_or_404(Counterparty, request.form.get("counterparty_id", type=int))
+    transaction_type = request.form.get("transaction_type")
+    amount = max(decimal_value(request.form.get("amount")), 0)
+    if transaction_type not in {"payment", "refund"} or amount <= 0:
+        flash("Укажите вид операции и положительную сумму", "danger")
+        return redirect(url_for("main.counterparties"))
+    current_debt = Decimal(counterparty.debt or 0)
+    counterparty.debt = current_debt - amount if transaction_type == "payment" else current_debt + amount
+    transaction = ReceivableTransaction(
+        counterparty_id=counterparty.id,
+        transaction_type=transaction_type,
+        amount=amount,
+        transaction_date=request.form.get("transaction_date", type=date.fromisoformat) or date.today(),
+        note=(request.form.get("note") or "").strip() or None,
+        balance_after=counterparty.debt,
+        created_by_id=current_user.id,
+    )
+    db.session.add(transaction)
+    db.session.commit()
+    message = "Оплата клиента зафиксирована" if transaction_type == "payment" else "Возврат денег клиенту зафиксирован"
+    flash(message, "success")
+    return redirect(url_for("main.counterparties"))
 
 
 @main.route("/warehouses", methods=["GET", "POST"])
@@ -866,6 +945,7 @@ def api_counterparties():
         row.registration_code = str(item.get("registration_code") or "").strip() or None
         row.legal_address, row.phone, row.email = str(item.get("address") or "").strip() or None, str(item.get("phone") or "").strip() or None, str(item.get("email") or "").strip() or None
         row.debt, row.is_active = decimal_value(item.get("debt")), bool(item.get("is_active", True))
+        row.payment_terms_days = max(int(item.get("payment_terms_days") or 0), 0)
         price_type_external_id = str(item.get("price_type_external_id") or "").strip()
         if price_type_external_id:
             price_type = PriceType.query.filter_by(external_id=price_type_external_id).first()
