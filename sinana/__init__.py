@@ -14,7 +14,7 @@ login_manager = LoginManager()
 def _upgrade_schema():
     """Add small backwards-compatible columns without requiring a migration service."""
     additions = {
-        "customer": {"counterparty_id": "INTEGER"},
+        "customer": {"counterparty_id": "INTEGER", "price_type_id": "INTEGER"},
         "product": {
             "external_id": "VARCHAR(100)",
             "external_group_id": "VARCHAR(100)",
@@ -26,6 +26,11 @@ def _upgrade_schema():
         },
         "production_order": {"source_warehouse_id": "INTEGER"},
         "counterparty": {"payment_terms_days": "INTEGER NOT NULL DEFAULT 0"},
+        "recipe": {
+            "additional_cost": "NUMERIC(14,2) NOT NULL DEFAULT 0",
+            "cost_notes": "VARCHAR(500)",
+        },
+        "recipe_item": {"quantity_unit": "VARCHAR(20)"},
     }
     inspector = inspect(db.engine)
     with db.engine.begin() as connection:

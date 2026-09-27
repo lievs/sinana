@@ -1,4 +1,4 @@
-const STATIC_CACHE = "sinana-static-v2";
+const STATIC_CACHE = "sinana-static-v3";
 const ASSETS = [
   "/static/css/app.css",
   "/static/css/layout.css",

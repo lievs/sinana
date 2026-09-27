@@ -43,10 +43,12 @@ class Customer(db.Model):
     gps_captured_at = db.Column(db.DateTime)
     assigned_rep_id = db.Column(db.Integer, db.ForeignKey("user.id"), index=True)
     counterparty_id = db.Column(db.Integer, db.ForeignKey("counterparty.id"), index=True)
+    price_type_id = db.Column(db.Integer, db.ForeignKey("price_type.id"), index=True)
     debt = db.Column(db.Numeric(14, 2), nullable=False, default=0)
     is_active = db.Column(db.Boolean, nullable=False, default=True)
     representative = db.relationship("User", foreign_keys=[assigned_rep_id])
     counterparty = db.relationship("Counterparty", foreign_keys=[counterparty_id])
+    price_type = db.relationship("PriceType", foreign_keys=[price_type_id])
 
 
 class Visit(db.Model):
@@ -214,6 +216,8 @@ class Recipe(db.Model):
     product_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False, unique=True)
     output_quantity = db.Column(db.Numeric(14, 3), nullable=False, default=1)
     labor_cost = db.Column(db.Numeric(14, 2), nullable=False, default=0)
+    additional_cost = db.Column(db.Numeric(14, 2), nullable=False, default=0)
+    cost_notes = db.Column(db.String(500))
     overhead_percent = db.Column(db.Numeric(8, 3), nullable=False, default=0)
     updated_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     product = db.relationship("Product")
@@ -225,6 +229,7 @@ class RecipeItem(db.Model):
     recipe_id = db.Column(db.Integer, db.ForeignKey("recipe.id"), nullable=False, index=True)
     component_id = db.Column(db.Integer, db.ForeignKey("product.id"), nullable=False)
     quantity = db.Column(db.Numeric(14, 4), nullable=False)
+    quantity_unit = db.Column(db.String(20))
     loss_percent = db.Column(db.Numeric(8, 3), nullable=False, default=0)
     recipe = db.relationship("Recipe", back_populates="items")
     component = db.relationship("Product")

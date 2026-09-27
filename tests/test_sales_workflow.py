@@ -4,7 +4,7 @@ from io import BytesIO
 from openpyxl import Workbook
 
 from sinana import create_app, db
-from sinana.models import Counterparty, Customer, Order, PriceType, Product, ProductionOrder, ReceivableTransaction, Recipe, RecipeItem, Setting, StockBalance, User, Visit, Warehouse
+from sinana.models import Counterparty, Customer, Order, OrderItem, PriceType, Product, ProductPrice, ProductionOrder, ReceivableTransaction, Recipe, RecipeItem, SalesReturn, Setting, StockBalance, User, Visit, Warehouse
 
 
 def make_app(tmp_path):
@@ -211,3 +211,65 @@ def test_manual_product_and_counterparty_receivables(tmp_path):
         assert counterparty.price_type_id == price_type_id
         assert float(counterparty.debt) == 500
         assert ReceivableTransaction.query.count() == 2
+
+
+def test_point_pricing_gram_recipe_and_representative_return(tmp_path):
+    app = make_app(tmp_path)
+    seed(app)
+    client = app.test_client()
+    login(client, "boss")
+    with app.app_context():
+        rep = User.query.filter_by(username="rep").one()
+        counterparty = Counterparty(name="Кондитерская", debt=0)
+        retail = PriceType(name="Розница")
+        flour = Product(barcode="FLOUR-KG", name="Мука", product_type="raw", unit="кг", calculated_cost=100)
+        cake = Product(barcode="CAKE-PCS", name="Торт", product_type="finished", unit="шт", price=1000)
+        source = Warehouse(name="Склад сырья", warehouse_type="raw")
+        target = Warehouse(name="Склад продукции", warehouse_type="finished")
+        db.session.add_all([counterparty, retail, flour, cake, source, target])
+        db.session.flush()
+        db.session.add(ProductPrice(product_id=cake.id, price_type_id=retail.id, price=900))
+        db.session.add(StockBalance(warehouse_id=source.id, product_id=flour.id, quantity=10))
+        db.session.commit()
+        rep_id, counterparty_id, price_type_id = rep.id, counterparty.id, retail.id
+        flour_id, cake_id, source_id, target_id = flour.id, cake.id, source.id, target.id
+    response = client.post("/customers", data={
+        "csrf_token": "token", "name": "Магазин", "address": "Красная, 1",
+        "representative_id": str(rep_id), "counterparty_id": str(counterparty_id),
+        "price_type_id": str(price_type_id), "latitude": "45.03547", "longitude": "38.975313",
+    })
+    assert response.status_code == 302
+    with app.app_context():
+        customer = Customer.query.filter_by(name="Магазин").one()
+        assert customer.price_type_id == price_type_id
+        assert customer.latitude == 45.03547
+        customer_id = customer.id
+        recipe = Recipe(product_id=cake_id, output_quantity=10, labor_cost=10, additional_cost=5, overhead_percent=10)
+        db.session.add(recipe)
+        db.session.flush()
+        db.session.add(RecipeItem(recipe_id=recipe.id, component_id=flour_id, quantity=500, quantity_unit="г", loss_percent=0))
+        production = ProductionOrder(number="PRD-GRAM", product_id=cake_id, source_warehouse_id=source_id, warehouse_id=target_id, planned_quantity=10)
+        db.session.add(production)
+        db.session.commit()
+        production_id = production.id
+    response = client.post(f"/production/{production_id}/complete", data={"csrf_token": "token", "actual_quantity": "10", "batch_number": "GRAM-1"})
+    assert response.status_code == 302
+    with app.app_context():
+        assert float(StockBalance.query.filter_by(warehouse_id=source_id, product_id=flour_id).one().quantity) == 9.5
+        assert float(db.session.get(Product, cake_id).calculated_cost) == 7.15
+    login(client, "rep")
+    response = client.post(f"/orders/new/{customer_id}", data={"csrf_token": "token", f"qty_{cake_id}": "2"})
+    assert response.status_code == 302
+    with app.app_context():
+        order = Order.query.filter_by(customer_id=customer_id).order_by(Order.id.desc()).first()
+        assert float(order.items[0].price) == 900
+        order_id, order_item_id = order.id, order.items[0].id
+    response = client.post(f"/mobile/returns/new/{order_id}", data={
+        "csrf_token": "token", "warehouse_id": str(target_id),
+        f"qty_{order_item_id}": "1", "reason": "Повреждение",
+    })
+    assert response.status_code == 302
+    with app.app_context():
+        sales_return = SalesReturn.query.filter_by(order_id=order_id).one()
+        assert float(sales_return.items[0].quantity) == 1
+        assert float(sales_return.total_amount) == 900

@@ -41,6 +41,11 @@ main = Blueprint("main", __name__)
 api = Blueprint("api", __name__)
 PHOTO_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "heic"}
 ORDER_STATUSES = {"submitted", "confirmed", "assembled", "delivered", "paid", "cancelled"}
+UNIT_ALIASES = {
+    "г": "г", "гр": "г", "грамм": "г", "граммы": "г", "g": "г",
+    "кг": "кг", "килограмм": "кг", "килограммы": "кг", "kg": "кг",
+    "шт": "шт", "шт.": "шт", "штука": "шт", "штуки": "шт", "pcs": "шт",
+}
 
 
 def manager_required(view):
@@ -90,6 +95,21 @@ def barcode_value(value):
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value).strip()
+
+
+def normalize_unit(value):
+    return UNIT_ALIASES.get(str(value or "шт").strip().lower(), "шт")
+
+
+def convert_quantity(quantity, from_unit, to_unit):
+    from_unit, to_unit = normalize_unit(from_unit), normalize_unit(to_unit)
+    if from_unit == to_unit:
+        return quantity
+    if from_unit == "г" and to_unit == "кг":
+        return quantity / Decimal("1000")
+    if from_unit == "кг" and to_unit == "г":
+        return quantity * Decimal("1000")
+    raise ValueError("Нельзя пересчитать массу в штуки или наоборот")
 
 
 def parse_coordinate(value):
@@ -180,7 +200,9 @@ def mobile():
     visits = Visit.query.filter_by(visit_date=date.today(), representative_id=rep.id).order_by(Visit.sequence).all()
     day_start = datetime.combine(date.today(), datetime.min.time())
     orders = Order.query.filter(Order.representative_id == rep.id, Order.created_at >= day_start).all()
-    return render_template("mobile.html", representative=rep, visits=visits, orders=orders, photo_required=bool_setting("photo_required", True), is_own_route=rep.id == current_user.id)
+    customers = Customer.query.filter_by(assigned_rep_id=rep.id, is_active=True).order_by(Customer.name).all()
+    recent_orders = Order.query.filter_by(representative_id=rep.id).filter(Order.status != "cancelled").order_by(Order.created_at.desc()).limit(30).all()
+    return render_template("mobile.html", representative=rep, visits=visits, orders=orders, customers=customers, recent_orders=recent_orders, photo_required=bool_setting("photo_required", True), is_own_route=rep.id == current_user.id)
 
 
 @main.route("/gps/ping", methods=["POST"])
@@ -275,7 +297,7 @@ def order_new(customer_id):
     if not current_user.is_manager and customer.assigned_rep_id != current_user.id:
         abort(403)
     products = Product.query.filter_by(is_active=True).order_by(Product.name).all()
-    prices = {product.id: product_price(product, customer.counterparty) for product in products}
+    prices = {product.id: product_price(product, customer) for product in products}
     if request.method == "POST":
         selected, total = [], Decimal("0")
         for product in products:
@@ -402,17 +424,53 @@ def team_role(user_id):
 @manager_required
 def customers():
     reps = User.query.filter_by(role="representative", is_active_user=True).order_by(User.full_name).all()
+    price_types = PriceType.query.filter_by(is_active=True).order_by(PriceType.name).all()
     if request.method == "POST":
         name, address = (request.form.get("name") or "").strip(), (request.form.get("address") or "").strip()
         rep = db.session.get(User, request.form.get("representative_id", type=int))
+        latitude, longitude = parse_coordinate(request.form.get("latitude")), parse_coordinate(request.form.get("longitude"))
+        coordinates_supplied = bool((request.form.get("latitude") or "").strip() or (request.form.get("longitude") or "").strip())
+        coordinates_valid = latitude is not None and longitude is not None and -90 <= latitude <= 90 and -180 <= longitude <= 180
         if not name or not address or not rep or rep.role != "representative":
             flash("Заполните название, адрес и представителя", "danger")
+        elif coordinates_supplied and not coordinates_valid:
+            flash("Укажите корректные широту и долготу либо оставьте оба поля пустыми", "danger")
         else:
-            db.session.add(Customer(name=name, address=address, assigned_rep_id=rep.id, counterparty_id=request.form.get("counterparty_id", type=int)))
+            db.session.add(Customer(
+                name=name,
+                address=address,
+                assigned_rep_id=rep.id,
+                counterparty_id=request.form.get("counterparty_id", type=int),
+                price_type_id=request.form.get("price_type_id", type=int),
+                latitude=latitude if coordinates_valid else None,
+                longitude=longitude if coordinates_valid else None,
+                gps_captured_at=datetime.utcnow() if coordinates_valid else None,
+            ))
             db.session.commit()
             flash("Торговая точка добавлена", "success")
         return redirect(url_for("main.customers"))
-    return render_template("customers.html", customers=Customer.query.order_by(Customer.name).all(), representatives=reps, counterparties=Counterparty.query.filter_by(is_active=True).order_by(Counterparty.name).all())
+    return render_template("customers.html", customers=Customer.query.order_by(Customer.name).all(), representatives=reps, counterparties=Counterparty.query.filter_by(is_active=True).order_by(Counterparty.name).all(), price_types=price_types)
+
+
+@main.route("/customers/<int:customer_id>/settings", methods=["POST"])
+@manager_required
+def customer_settings(customer_id):
+    customer = db.get_or_404(Customer, customer_id)
+    latitude, longitude = parse_coordinate(request.form.get("latitude")), parse_coordinate(request.form.get("longitude"))
+    coordinates_supplied = bool((request.form.get("latitude") or "").strip() or (request.form.get("longitude") or "").strip())
+    if coordinates_supplied and (latitude is None or longitude is None or not (-90 <= latitude <= 90 and -180 <= longitude <= 180)):
+        flash("Укажите корректные GPS-координаты", "danger")
+        return redirect(url_for("main.customers"))
+    price_type_id = request.form.get("price_type_id", type=int)
+    if price_type_id and not db.session.get(PriceType, price_type_id):
+        abort(400, "Неизвестный тип цен")
+    customer.price_type_id = price_type_id
+    if coordinates_supplied:
+        customer.latitude, customer.longitude = latitude, longitude
+        customer.gps_captured_at = datetime.utcnow()
+    db.session.commit()
+    flash("Тип цен и GPS торговой точки сохранены", "success")
+    return redirect(url_for("main.customers"))
 
 
 @main.route("/customers/<int:customer_id>/toggle", methods=["POST"])
@@ -506,7 +564,7 @@ def products():
                     barcode=barcode,
                     name=name,
                     product_type=product_type,
-                    unit=(request.form.get("unit") or "шт").strip(),
+                    unit=normalize_unit(request.form.get("unit")),
                     shelf_life_days=max(request.form.get("shelf_life_days", type=int) or 0, 0) or None,
                     price=max(decimal_value(request.form.get("price")), 0),
                     calculated_cost=max(decimal_value(request.form.get("calculated_cost")), 0),
@@ -544,7 +602,7 @@ def products():
                     if cost_col is not None:
                         product.calculated_cost = decimal_value(row[cost_col])
                     if unit_col is not None:
-                        product.unit = str(row[unit_col] or "шт").strip()
+                        product.unit = normalize_unit(row[unit_col])
                     if type_col is not None and str(row[type_col] or "").strip() in {"raw", "semi_finished", "finished", "packaging"}:
                         product.product_type = str(row[type_col]).strip()
                     product.external_group_id = setting("one_c_product_group_id") or product.external_group_id
@@ -575,9 +633,12 @@ def settings():
     return render_template("settings.html", photo_required=bool_setting("photo_required", True), monthly_sales_plan=setting("monthly_sales_plan", "1000000"), product_group_id=setting("one_c_product_group_id"), api_configured=bool(current_app.config.get("ONE_C_API_TOKEN")))
 
 
-def product_price(product, counterparty=None):
-    if counterparty and counterparty.price_type_id:
-        row = ProductPrice.query.filter_by(product_id=product.id, price_type_id=counterparty.price_type_id).first()
+def product_price(product, customer=None):
+    price_type_id = None
+    if customer:
+        price_type_id = customer.price_type_id or (customer.counterparty.price_type_id if customer.counterparty else None)
+    if price_type_id:
+        row = ProductPrice.query.filter_by(product_id=product.id, price_type_id=price_type_id).first()
         if row:
             return row.price
     return product.price
@@ -586,9 +647,10 @@ def product_price(product, counterparty=None):
 def recalculate_recipe(recipe):
     material_cost = Decimal("0")
     for item in recipe.items:
-        quantity_with_loss = item.quantity * (Decimal("1") + item.loss_percent / Decimal("100"))
+        quantity_in_stock_unit = convert_quantity(item.quantity, item.quantity_unit or item.component.unit, item.component.unit)
+        quantity_with_loss = quantity_in_stock_unit * (Decimal("1") + item.loss_percent / Decimal("100"))
         material_cost += quantity_with_loss * item.component.calculated_cost
-    base = material_cost + recipe.labor_cost
+    base = material_cost + recipe.labor_cost + recipe.additional_cost
     total = base * (Decimal("1") + recipe.overhead_percent / Decimal("100"))
     unit_cost = total / recipe.output_quantity if recipe.output_quantity else Decimal("0")
     recipe.product.calculated_cost = unit_cost
@@ -727,9 +789,12 @@ def recipes():
     products = Product.query.filter_by(is_active=True).order_by(Product.name).all()
     if request.method == "POST":
         finished = db.get_or_404(Product, request.form.get("product_id", type=int))
+        finished.product_type = "finished"
         recipe = Recipe.query.filter_by(product_id=finished.id).first() or Recipe(product_id=finished.id)
         recipe.output_quantity = max(decimal_value(request.form.get("output_quantity"), Decimal("1")), Decimal("0.001"))
         recipe.labor_cost = max(decimal_value(request.form.get("labor_cost")), 0)
+        recipe.additional_cost = max(decimal_value(request.form.get("additional_cost")), 0)
+        recipe.cost_notes = (request.form.get("cost_notes") or "").strip() or None
         recipe.overhead_percent = max(decimal_value(request.form.get("overhead_percent")), 0)
         db.session.add(recipe)
         db.session.commit()
@@ -749,12 +814,18 @@ def recipe_edit(recipe_id):
         else:
             item = RecipeItem.query.filter_by(recipe_id=recipe.id, component_id=component.id).first() or RecipeItem(recipe_id=recipe.id, component_id=component.id)
             item.quantity = max(decimal_value(request.form.get("quantity")), Decimal("0.0001"))
+            item.quantity_unit = normalize_unit(request.form.get("quantity_unit"))
             item.loss_percent = max(decimal_value(request.form.get("loss_percent")), 0)
-            db.session.add(item)
-            db.session.flush()
-            recalculate_recipe(recipe)
-            db.session.commit()
-            flash("Компонент добавлен, себестоимость пересчитана", "success")
+            try:
+                convert_quantity(item.quantity, item.quantity_unit, component.unit)
+            except ValueError:
+                flash("Для весового ингредиента выберите граммы или килограммы; для штучного — штуки", "danger")
+            else:
+                db.session.add(item)
+                db.session.flush()
+                recalculate_recipe(recipe)
+                db.session.commit()
+                flash("Компонент добавлен, себестоимость пересчитана", "success")
         return redirect(url_for("main.recipe_edit", recipe_id=recipe.id))
     recalculate_recipe(recipe)
     db.session.commit()
@@ -796,7 +867,8 @@ def production_complete(order_id):
     factor = actual / recipe.output_quantity
     requirements = []
     for item in recipe.items:
-        required = item.quantity * factor * (Decimal("1") + item.loss_percent / Decimal("100"))
+        required_per_recipe = convert_quantity(item.quantity, item.quantity_unit or item.component.unit, item.component.unit)
+        required = required_per_recipe * factor * (Decimal("1") + item.loss_percent / Decimal("100"))
         balance = StockBalance.query.filter_by(warehouse_id=production_order.source_warehouse_id, product_id=item.component_id).first()
         if not balance or balance.quantity < required:
             available = balance.quantity if balance else 0
@@ -819,6 +891,59 @@ def production_complete(order_id):
     db.session.commit()
     flash("Выпуск проведён: сырьё списано, готовая продукция оприходована", "success")
     return redirect(url_for("main.production"))
+
+
+@main.route("/mobile/returns/new/<int:order_id>", methods=["GET", "POST"])
+@login_required
+def mobile_return_new(order_id):
+    order = db.get_or_404(Order, order_id)
+    if not current_user.is_manager and order.representative_id != current_user.id:
+        abort(403)
+    if not order.customer.counterparty:
+        flash("Для возврата привяжите торговую точку к контрагенту", "danger")
+        return redirect(url_for("main.mobile"))
+    warehouses_rows = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.name).all()
+    returned_rows = (
+        db.session.query(SalesReturnItem.product_id, func.coalesce(func.sum(SalesReturnItem.quantity), 0))
+        .join(SalesReturn)
+        .filter(SalesReturn.order_id == order.id)
+        .group_by(SalesReturnItem.product_id)
+        .all()
+    )
+    returned = {product_id: quantity for product_id, quantity in returned_rows}
+    available = {item.product_id: max(item.quantity - returned.get(item.product_id, 0), 0) for item in order.items}
+    if request.method == "POST":
+        warehouse = db.get_or_404(Warehouse, request.form.get("warehouse_id", type=int))
+        selected, total = [], Decimal("0")
+        for item in order.items:
+            quantity = decimal_value(request.form.get(f"qty_{item.id}"))
+            maximum = available[item.product_id]
+            if quantity < 0 or quantity > maximum:
+                flash(f"По товару «{item.product.name}» можно вернуть не более {maximum}", "danger")
+                return redirect(url_for("main.mobile_return_new", order_id=order.id))
+            if quantity > 0:
+                selected.append((item, quantity))
+                total += quantity * item.price
+        if not selected:
+            flash("Укажите количество возвращаемого товара", "danger")
+        else:
+            sales_return = SalesReturn(
+                number=f"RET-{datetime.now():%Y%m%d}-{uuid4().hex[:5].upper()}",
+                order_id=order.id,
+                counterparty_id=order.customer.counterparty_id,
+                warehouse_id=warehouse.id,
+                reason=(request.form.get("reason") or "Возврат по заказу").strip(),
+                status="draft",
+                total_amount=total,
+            )
+            db.session.add(sales_return)
+            db.session.flush()
+            for item, quantity in selected:
+                db.session.add(SalesReturnItem(return_id=sales_return.id, product_id=item.product_id, quantity=quantity, price=item.price))
+            db.session.commit()
+            flash(f"Возврат {sales_return.number} оформлен и передан руководителю", "success")
+            return redirect(url_for("main.mobile"))
+    return render_template("mobile_return.html", order=order, warehouses=warehouses_rows, available=available)
 
 
 @main.route("/returns", methods=["GET", "POST"])
@@ -911,7 +1036,7 @@ def api_catalog():
             continue
         product = Product.query.filter((Product.external_id == external_id) | (Product.barcode == barcode)).first() or Product(barcode=barcode)
         product.external_id, product.external_group_id, product.barcode, product.name = external_id, group_id, barcode, name
-        product.unit = str(row.get("unit") or "шт").strip()
+        product.unit = normalize_unit(row.get("unit"))
         product.product_type = str(row.get("type") or "finished").strip() if str(row.get("type") or "finished") in {"raw", "semi_finished", "finished", "packaging"} else "finished"
         product.shelf_life_days = int(row["shelf_life_days"]) if row.get("shelf_life_days") not in (None, "") else None
         product.allergens = str(row.get("allergens") or "").strip() or None

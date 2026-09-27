@@ -11,7 +11,7 @@
       <label>Штрихкод<input name="barcode" inputmode="numeric" required></label>
       <label>Наименование<input name="name" required></label>
       <div class="form-grid">
-        <label>Единица<input name="unit" value="шт" required></label>
+        <label>Единица<select name="unit" required><option value="г">граммы</option><option value="кг">килограммы</option><option value="шт" selected>штуки</option></select></label>
         <label>Тип<select name="product_type"><option value="finished">Готовая продукция</option><option value="raw">Сырьё</option><option value="semi_finished">Полуфабрикат</option><option value="packaging">Упаковка</option></select></label>
         <label>Цена, ₽<input type="number" name="price" min="0" step="0.01" value="0"></label>
         <label>Себестоимость, ₽<input type="number" name="calculated_cost" min="0" step="0.0001" value="0"></label>
