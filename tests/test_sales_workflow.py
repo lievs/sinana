@@ -4,7 +4,7 @@ from io import BytesIO
 from openpyxl import Workbook
 
 from sinana import create_app, db
-from sinana.models import Customer, Order, Product, User, Visit
+from sinana.models import Counterparty, Customer, Order, Product, ProductionOrder, Recipe, RecipeItem, Setting, StockBalance, User, Visit, Warehouse
 
 
 def make_app(tmp_path):
@@ -92,6 +92,62 @@ def test_all_role_pages_render(tmp_path):
     seed(app)
     client = app.test_client()
     login(client, "boss")
-    for path in ["/", "/orders", "/customers", "/routes", "/tracking", "/products", "/team", "/settings", "/mobile?rep_id=2"]:
+    for path in ["/", "/orders", "/customers", "/routes", "/tracking", "/products", "/team", "/settings", "/mobile?rep_id=2", "/erp", "/counterparties", "/warehouses", "/price-types", "/recipes", "/production", "/returns"]:
         response = client.get(path)
         assert response.status_code == 200, path
+
+
+def test_1c_catalog_uses_configured_group_and_syncs_directories(tmp_path):
+    app = make_app(tmp_path)
+    seed(app)
+    client = app.test_client()
+    with app.app_context():
+        db.session.add(Setting(key="one_c_product_group_id", value="GROUP-CAKE"))
+        db.session.commit()
+    rejected = client.post("/api/1c/catalog", json={"group_id": "OTHER", "items": []}, headers={"X-API-Key": "integration-secret"})
+    assert rejected.status_code == 400
+    response = client.post("/api/1c/catalog", json={"group_id": "GROUP-CAKE", "full_sync": True, "items": [{"external_id": "P-1", "barcode": "460777", "name": "Торт", "type": "finished", "unit": "шт", "shelf_life_days": 5, "price": 900}]}, headers={"X-API-Key": "integration-secret"})
+    assert response.json["updated"] == 1
+    response = client.post("/api/1c/counterparties", json={"items": [{"external_id": "C-1", "name": "Магазин", "tax_id": "123", "debt": 100}]}, headers={"X-API-Key": "integration-secret"})
+    assert response.json["updated"] == 1
+    response = client.post("/api/1c/prices", json={"price_types": [{"external_id": "PT-1", "name": "Оптовая"}], "prices": [{"product_external_id": "P-1", "price_type_external_id": "PT-1", "price": 750}]}, headers={"X-API-Key": "integration-secret"})
+    assert response.json["updated"] == 1
+    response = client.post("/api/1c/warehouses", json={"items": [{"external_id": "W-1", "name": "Готовая продукция", "type": "finished"}]}, headers={"X-API-Key": "integration-secret"})
+    assert response.json["updated"] == 1
+    response = client.post("/api/1c/stocks", json={"items": [{"barcode": "460777", "warehouse_external_id": "W-1", "quantity": 12}]}, headers={"X-API-Key": "integration-secret"})
+    assert response.json["updated"] == 1
+    with app.app_context():
+        assert Product.query.filter_by(external_group_id="GROUP-CAKE").one().stock_qty == 12
+        assert Counterparty.query.filter_by(external_id="C-1").one().name == "Магазин"
+        assert Warehouse.query.filter_by(external_id="W-1").one().name == "Готовая продукция"
+
+
+def test_production_uses_recipe_cost_and_moves_stock(tmp_path):
+    app = make_app(tmp_path)
+    seed(app)
+    client = app.test_client()
+    login(client, "boss")
+    with app.app_context():
+        raw = Product(barcode="RAW", name="Мука", product_type="raw", unit="кг", calculated_cost=10)
+        cake = Product(barcode="CAKE", name="Торт", product_type="finished", unit="шт")
+        source = Warehouse(name="Сырьё", warehouse_type="raw")
+        target = Warehouse(name="Готовая продукция", warehouse_type="finished")
+        db.session.add_all([raw, cake, source, target])
+        db.session.flush()
+        recipe = Recipe(product_id=cake.id, output_quantity=10, labor_cost=20, overhead_percent=10)
+        db.session.add(recipe)
+        db.session.flush()
+        db.session.add(RecipeItem(recipe_id=recipe.id, component_id=raw.id, quantity=5, loss_percent=0))
+        db.session.add(StockBalance(warehouse_id=source.id, product_id=raw.id, quantity=100))
+        production = ProductionOrder(number="PRD-TEST", product_id=cake.id, source_warehouse_id=source.id, warehouse_id=target.id, planned_quantity=10)
+        db.session.add(production)
+        db.session.commit()
+        production_id = production.id
+    response = client.post(f"/production/{production_id}/complete", data={"csrf_token": "token", "actual_quantity": "10", "batch_number": "B-1"})
+    assert response.status_code == 302
+    with app.app_context():
+        production = db.session.get(ProductionOrder, production_id)
+        assert production.status == "completed"
+        assert float(production.actual_cost) == 7.7
+        assert float(StockBalance.query.join(Product).filter(Product.barcode == "RAW").one().quantity) == 95
+        assert float(StockBalance.query.join(Product).filter(Product.barcode == "CAKE").one().quantity) == 10

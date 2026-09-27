@@ -5,9 +5,38 @@ from pathlib import Path
 from flask import Flask, abort, redirect, request, session, url_for
 from flask_login import LoginManager, current_user
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import inspect, text
 
 db = SQLAlchemy()
 login_manager = LoginManager()
+
+
+def _upgrade_local_sqlite_schema():
+    """Keep the local test database usable while the project is pre-deployment."""
+    if db.engine.dialect.name != "sqlite":
+        return
+    additions = {
+        "customer": {"counterparty_id": "INTEGER"},
+        "product": {
+            "external_id": "VARCHAR(100)",
+            "external_group_id": "VARCHAR(100)",
+            "product_type": "VARCHAR(24) NOT NULL DEFAULT 'finished'",
+            "unit": "VARCHAR(20) NOT NULL DEFAULT 'шт'",
+            "shelf_life_days": "INTEGER",
+            "allergens": "VARCHAR(500)",
+            "calculated_cost": "NUMERIC(14,4) NOT NULL DEFAULT 0",
+        },
+        "production_order": {"source_warehouse_id": "INTEGER"},
+    }
+    inspector = inspect(db.engine)
+    with db.engine.begin() as connection:
+        for table_name, columns in additions.items():
+            if table_name not in inspector.get_table_names():
+                continue
+            existing = {column["name"] for column in inspector.get_columns(table_name)}
+            for name, definition in columns.items():
+                if name not in existing:
+                    connection.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN "{name}" {definition}'))
 
 
 def create_app(test_config=None):
@@ -97,4 +126,5 @@ def create_app(test_config=None):
 
     with app.app_context():
         db.create_all()
+        _upgrade_local_sqlite_schema()
     return app

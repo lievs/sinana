@@ -12,7 +12,28 @@ from sqlalchemy import func
 from werkzeug.utils import secure_filename
 
 from . import db
-from .models import Customer, LocationPing, Order, OrderItem, PhotoReport, Product, Setting, SyncLog, User, Visit
+from .models import (
+    Counterparty,
+    Customer,
+    LocationPing,
+    Order,
+    OrderItem,
+    PhotoReport,
+    PriceType,
+    Product,
+    ProductPrice,
+    ProductionOrder,
+    Recipe,
+    RecipeItem,
+    SalesReturn,
+    SalesReturnItem,
+    Setting,
+    StockBalance,
+    SyncLog,
+    User,
+    Visit,
+    Warehouse,
+)
 
 auth = Blueprint("auth", __name__)
 main = Blueprint("main", __name__)
@@ -253,13 +274,15 @@ def order_new(customer_id):
     if not current_user.is_manager and customer.assigned_rep_id != current_user.id:
         abort(403)
     products = Product.query.filter_by(is_active=True).order_by(Product.name).all()
+    prices = {product.id: product_price(product, customer.counterparty) for product in products}
     if request.method == "POST":
         selected, total = [], Decimal("0")
         for product in products:
             qty = decimal_value(request.form.get(f"qty_{product.id}"))
             if qty > 0:
-                selected.append((product, qty))
-                total += qty * product.price
+                price = prices[product.id]
+                selected.append((product, qty, price))
+                total += qty * price
         if not selected:
             flash("Добавьте хотя бы один товар", "danger")
         else:
@@ -267,15 +290,15 @@ def order_new(customer_id):
             order = Order(number=number, customer_id=customer.id, representative_id=current_user.id, total_amount=total)
             db.session.add(order)
             db.session.flush()
-            for product, qty in selected:
-                db.session.add(OrderItem(order_id=order.id, product_id=product.id, quantity=qty, price=product.price))
+            for product, qty, price in selected:
+                db.session.add(OrderItem(order_id=order.id, product_id=product.id, quantity=qty, price=price))
             visit = Visit.query.filter_by(customer_id=customer.id, representative_id=current_user.id, visit_date=date.today()).first()
             if visit:
                 visit.result = "order"
             db.session.commit()
             flash(f"Заказ {number} создан и ожидает передачи в 1С", "success")
             return redirect(url_for("main.mobile"))
-    return render_template("order_form.html", customer=customer, products=products)
+    return render_template("order_form.html", customer=customer, products=products, prices=prices)
 
 
 @main.route("/orders")
@@ -384,11 +407,11 @@ def customers():
         if not name or not address or not rep or rep.role != "representative":
             flash("Заполните название, адрес и представителя", "danger")
         else:
-            db.session.add(Customer(name=name, address=address, assigned_rep_id=rep.id))
+            db.session.add(Customer(name=name, address=address, assigned_rep_id=rep.id, counterparty_id=request.form.get("counterparty_id", type=int)))
             db.session.commit()
             flash("Торговая точка добавлена", "success")
         return redirect(url_for("main.customers"))
-    return render_template("customers.html", customers=Customer.query.order_by(Customer.name).all(), representatives=reps)
+    return render_template("customers.html", customers=Customer.query.order_by(Customer.name).all(), representatives=reps, counterparties=Counterparty.query.filter_by(is_active=True).order_by(Counterparty.name).all())
 
 
 @main.route("/customers/<int:customer_id>/toggle", methods=["POST"])
@@ -477,6 +500,9 @@ def products():
             barcode_col = next((headers[key] for key in headers if key in {"штрихкод", "barcode", "штрих-код"}), None)
             name_col = next((headers[key] for key in headers if key in {"наименование", "название", "name"}), None)
             price_col = next((headers[key] for key in headers if key in {"цена", "price"}), None)
+            cost_col = next((headers[key] for key in headers if key in {"себестоимость", "cost"}), None)
+            unit_col = next((headers[key] for key in headers if key in {"единица", "ед. изм.", "unit"}), None)
+            type_col = next((headers[key] for key in headers if key in {"тип", "type"}), None)
             if barcode_col is None or name_col is None:
                 flash("Нужны колонки «Штрихкод» и «Наименование»", "danger")
             else:
@@ -489,6 +515,13 @@ def products():
                     product.name, product.is_active = name, True
                     if price_col is not None:
                         product.price = decimal_value(row[price_col])
+                    if cost_col is not None:
+                        product.calculated_cost = decimal_value(row[cost_col])
+                    if unit_col is not None:
+                        product.unit = str(row[unit_col] or "шт").strip()
+                    if type_col is not None and str(row[type_col] or "").strip() in {"raw", "semi_finished", "finished", "packaging"}:
+                        product.product_type = str(row[type_col]).strip()
+                    product.external_group_id = setting("one_c_product_group_id") or product.external_group_id
                     db.session.add(product)
                     count += 1
                 db.session.commit()
@@ -504,6 +537,7 @@ def settings():
         values = {
             "photo_required": "1" if request.form.get("photo_required") else "0",
             "monthly_sales_plan": str(max(decimal_value(request.form.get("monthly_sales_plan")), 0)),
+            "one_c_product_group_id": (request.form.get("one_c_product_group_id") or "").strip(),
         }
         for key, value in values.items():
             row = db.session.get(Setting, key) or Setting(key=key)
@@ -512,11 +546,253 @@ def settings():
         db.session.commit()
         flash("Настройки сохранены", "success")
         return redirect(url_for("main.settings"))
-    return render_template("settings.html", photo_required=bool_setting("photo_required", True), monthly_sales_plan=setting("monthly_sales_plan", "1000000"), api_configured=bool(current_app.config.get("ONE_C_API_TOKEN")))
+    return render_template("settings.html", photo_required=bool_setting("photo_required", True), monthly_sales_plan=setting("monthly_sales_plan", "1000000"), product_group_id=setting("one_c_product_group_id"), api_configured=bool(current_app.config.get("ONE_C_API_TOKEN")))
+
+
+def product_price(product, counterparty=None):
+    if counterparty and counterparty.price_type_id:
+        row = ProductPrice.query.filter_by(product_id=product.id, price_type_id=counterparty.price_type_id).first()
+        if row:
+            return row.price
+    return product.price
+
+
+def recalculate_recipe(recipe):
+    material_cost = Decimal("0")
+    for item in recipe.items:
+        quantity_with_loss = item.quantity * (Decimal("1") + item.loss_percent / Decimal("100"))
+        material_cost += quantity_with_loss * item.component.calculated_cost
+    base = material_cost + recipe.labor_cost
+    total = base * (Decimal("1") + recipe.overhead_percent / Decimal("100"))
+    unit_cost = total / recipe.output_quantity if recipe.output_quantity else Decimal("0")
+    recipe.product.calculated_cost = unit_cost
+    return unit_cost
+
+
+@main.route("/erp")
+@manager_required
+def erp():
+    planned = ProductionOrder.query.filter(ProductionOrder.status.in_(("planned", "in_progress"))).count()
+    low_stock = StockBalance.query.filter(StockBalance.quantity <= 0).count()
+    return render_template(
+        "erp.html",
+        products=Product.query.filter_by(is_active=True).count(),
+        counterparties=Counterparty.query.filter_by(is_active=True).count(),
+        warehouses=Warehouse.query.filter_by(is_active=True).count(),
+        production_planned=planned,
+        returns_open=SalesReturn.query.filter(SalesReturn.status != "completed").count(),
+        low_stock=low_stock,
+    )
+
+
+@main.route("/counterparties", methods=["GET", "POST"])
+@manager_required
+def counterparties():
+    price_types = PriceType.query.filter_by(is_active=True).order_by(PriceType.name).all()
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        if not name:
+            flash("Укажите наименование контрагента", "danger")
+        else:
+            db.session.add(Counterparty(name=name, tax_id=(request.form.get("tax_id") or "").strip() or None, phone=(request.form.get("phone") or "").strip() or None, price_type_id=request.form.get("price_type_id", type=int)))
+            db.session.commit()
+            flash("Контрагент добавлен", "success")
+        return redirect(url_for("main.counterparties"))
+    return render_template("counterparties.html", counterparties=Counterparty.query.order_by(Counterparty.name).all(), price_types=price_types)
+
+
+@main.route("/warehouses", methods=["GET", "POST"])
+@manager_required
+def warehouses():
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        if not name or Warehouse.query.filter_by(name=name).first():
+            flash("Укажите уникальное название склада", "danger")
+        else:
+            db.session.add(Warehouse(name=name, warehouse_type=request.form.get("warehouse_type") or "finished"))
+            db.session.commit()
+            flash("Склад добавлен", "success")
+        return redirect(url_for("main.warehouses"))
+    return render_template("warehouses.html", warehouses=Warehouse.query.order_by(Warehouse.name).all(), balances=StockBalance.query.order_by(StockBalance.warehouse_id, StockBalance.product_id).limit(1000).all())
+
+
+@main.route("/price-types", methods=["GET", "POST"])
+@manager_required
+def price_types():
+    if request.method == "POST":
+        name = (request.form.get("name") or "").strip()
+        if name and not PriceType.query.filter_by(name=name).first():
+            db.session.add(PriceType(name=name))
+            db.session.commit()
+            flash("Тип цен добавлен", "success")
+        return redirect(url_for("main.price_types"))
+    return render_template("price_types.html", price_types=PriceType.query.order_by(PriceType.name).all(), products=Product.query.filter_by(is_active=True).order_by(Product.name).all(), prices=ProductPrice.query.all())
+
+
+@main.route("/price-types/set", methods=["POST"])
+@manager_required
+def price_set():
+    product = db.get_or_404(Product, request.form.get("product_id", type=int))
+    price_type = db.get_or_404(PriceType, request.form.get("price_type_id", type=int))
+    row = ProductPrice.query.filter_by(product_id=product.id, price_type_id=price_type.id).first() or ProductPrice(product_id=product.id, price_type_id=price_type.id)
+    row.price = max(decimal_value(request.form.get("price")), 0)
+    db.session.add(row)
+    db.session.commit()
+    flash("Цена установлена", "success")
+    return redirect(url_for("main.price_types"))
+
+
+@main.route("/recipes", methods=["GET", "POST"])
+@manager_required
+def recipes():
+    products = Product.query.filter_by(is_active=True).order_by(Product.name).all()
+    if request.method == "POST":
+        finished = db.get_or_404(Product, request.form.get("product_id", type=int))
+        recipe = Recipe.query.filter_by(product_id=finished.id).first() or Recipe(product_id=finished.id)
+        recipe.output_quantity = max(decimal_value(request.form.get("output_quantity"), Decimal("1")), Decimal("0.001"))
+        recipe.labor_cost = max(decimal_value(request.form.get("labor_cost")), 0)
+        recipe.overhead_percent = max(decimal_value(request.form.get("overhead_percent")), 0)
+        db.session.add(recipe)
+        db.session.commit()
+        flash("Комплектация сохранена; добавьте компоненты", "success")
+        return redirect(url_for("main.recipe_edit", recipe_id=recipe.id))
+    return render_template("recipes.html", recipes=Recipe.query.order_by(Recipe.id.desc()).all(), products=products)
+
+
+@main.route("/recipes/<int:recipe_id>", methods=["GET", "POST"])
+@manager_required
+def recipe_edit(recipe_id):
+    recipe = db.get_or_404(Recipe, recipe_id)
+    if request.method == "POST":
+        component = db.get_or_404(Product, request.form.get("component_id", type=int))
+        if component.id == recipe.product_id:
+            flash("Товар не может входить в собственную комплектацию", "danger")
+        else:
+            item = RecipeItem.query.filter_by(recipe_id=recipe.id, component_id=component.id).first() or RecipeItem(recipe_id=recipe.id, component_id=component.id)
+            item.quantity = max(decimal_value(request.form.get("quantity")), Decimal("0.0001"))
+            item.loss_percent = max(decimal_value(request.form.get("loss_percent")), 0)
+            db.session.add(item)
+            db.session.flush()
+            recalculate_recipe(recipe)
+            db.session.commit()
+            flash("Компонент добавлен, себестоимость пересчитана", "success")
+        return redirect(url_for("main.recipe_edit", recipe_id=recipe.id))
+    recalculate_recipe(recipe)
+    db.session.commit()
+    return render_template("recipe_edit.html", recipe=recipe, components=Product.query.filter(Product.id != recipe.product_id, Product.is_active.is_(True)).order_by(Product.name).all())
+
+
+@main.route("/production", methods=["GET", "POST"])
+@manager_required
+def production():
+    finished = Product.query.filter_by(is_active=True, product_type="finished").order_by(Product.name).all()
+    warehouses_rows = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.name).all()
+    if request.method == "POST":
+        product = db.get_or_404(Product, request.form.get("product_id", type=int))
+        warehouse = db.get_or_404(Warehouse, request.form.get("warehouse_id", type=int))
+        source_warehouse = db.get_or_404(Warehouse, request.form.get("source_warehouse_id", type=int))
+        quantity = decimal_value(request.form.get("planned_quantity"))
+        if quantity <= 0 or not Recipe.query.filter_by(product_id=product.id).first():
+            flash("Укажите количество и создайте комплектацию товара", "danger")
+        else:
+            number = f"PRD-{datetime.now():%Y%m%d}-{uuid4().hex[:5].upper()}"
+            db.session.add(ProductionOrder(number=number, product_id=product.id, source_warehouse_id=source_warehouse.id, warehouse_id=warehouse.id, planned_quantity=quantity, planned_date=datetime.strptime(request.form.get("planned_date"), "%Y-%m-%d").date()))
+            db.session.commit()
+            flash("Производственное задание создано", "success")
+        return redirect(url_for("main.production"))
+    return render_template("production.html", orders=ProductionOrder.query.order_by(ProductionOrder.planned_date.desc(), ProductionOrder.id.desc()).all(), products=finished, warehouses=warehouses_rows)
+
+
+@main.route("/production/<int:order_id>/complete", methods=["POST"])
+@manager_required
+def production_complete(order_id):
+    production_order = db.get_or_404(ProductionOrder, order_id)
+    if production_order.status == "completed":
+        return redirect(url_for("main.production"))
+    actual = decimal_value(request.form.get("actual_quantity"))
+    recipe = Recipe.query.filter_by(product_id=production_order.product_id).first()
+    if actual <= 0 or not recipe:
+        flash("Укажите фактический выпуск", "danger")
+        return redirect(url_for("main.production"))
+    factor = actual / recipe.output_quantity
+    requirements = []
+    for item in recipe.items:
+        required = item.quantity * factor * (Decimal("1") + item.loss_percent / Decimal("100"))
+        balance = StockBalance.query.filter_by(warehouse_id=production_order.source_warehouse_id, product_id=item.component_id).first()
+        if not balance or balance.quantity < required:
+            available = balance.quantity if balance else 0
+            flash(f"Недостаточно «{item.component.name}»: нужно {required}, доступно {available}", "danger")
+            return redirect(url_for("main.production"))
+        requirements.append((balance, required))
+    for balance, required in requirements:
+        balance.quantity -= required
+        db.session.add(balance)
+    finished_balance = StockBalance.query.filter_by(warehouse_id=production_order.warehouse_id, product_id=production_order.product_id).first() or StockBalance(warehouse_id=production_order.warehouse_id, product_id=production_order.product_id, quantity=0)
+    finished_balance.quantity += actual
+    production_order.actual_quantity = actual
+    production_order.actual_cost = recalculate_recipe(recipe)
+    production_order.status = "completed"
+    production_order.produced_at = datetime.utcnow()
+    production_order.batch_number = (request.form.get("batch_number") or production_order.number).strip()
+    if production_order.product.shelf_life_days:
+        production_order.expires_at = date.today() + timedelta(days=production_order.product.shelf_life_days)
+    db.session.add(finished_balance)
+    db.session.commit()
+    flash("Выпуск проведён: сырьё списано, готовая продукция оприходована", "success")
+    return redirect(url_for("main.production"))
+
+
+@main.route("/returns", methods=["GET", "POST"])
+@manager_required
+def returns():
+    counterparties_rows = Counterparty.query.filter_by(is_active=True).order_by(Counterparty.name).all()
+    warehouses_rows = Warehouse.query.filter_by(is_active=True).order_by(Warehouse.name).all()
+    if request.method == "POST":
+        counterparty = db.get_or_404(Counterparty, request.form.get("counterparty_id", type=int))
+        warehouse = db.get_or_404(Warehouse, request.form.get("warehouse_id", type=int))
+        number = f"RET-{datetime.now():%Y%m%d}-{uuid4().hex[:5].upper()}"
+        row = SalesReturn(number=number, counterparty_id=counterparty.id, warehouse_id=warehouse.id, reason=(request.form.get("reason") or "").strip(), status="draft")
+        db.session.add(row)
+        db.session.commit()
+        flash("Возврат создан", "success")
+        return redirect(url_for("main.return_edit", return_id=row.id))
+    return render_template("returns.html", returns=SalesReturn.query.order_by(SalesReturn.created_at.desc()).all(), counterparties=counterparties_rows, warehouses=warehouses_rows)
+
+
+@main.route("/returns/<int:return_id>", methods=["GET", "POST"])
+@manager_required
+def return_edit(return_id):
+    sales_return = db.get_or_404(SalesReturn, return_id)
+    if request.method == "POST" and sales_return.status == "draft":
+        product = db.get_or_404(Product, request.form.get("product_id", type=int))
+        quantity = decimal_value(request.form.get("quantity"))
+        price = decimal_value(request.form.get("price"), product.price)
+        if quantity > 0:
+            db.session.add(SalesReturnItem(return_id=sales_return.id, product_id=product.id, quantity=quantity, price=price))
+            sales_return.total_amount += quantity * price
+            db.session.commit()
+        return redirect(url_for("main.return_edit", return_id=sales_return.id))
+    return render_template("return_edit.html", sales_return=sales_return, products=Product.query.filter_by(is_active=True).order_by(Product.name).all())
+
+
+@main.route("/returns/<int:return_id>/post", methods=["POST"])
+@manager_required
+def return_post(return_id):
+    sales_return = db.get_or_404(SalesReturn, return_id)
+    if sales_return.status == "draft" and sales_return.items:
+        for item in sales_return.items:
+            balance = StockBalance.query.filter_by(warehouse_id=sales_return.warehouse_id, product_id=item.product_id).first() or StockBalance(warehouse_id=sales_return.warehouse_id, product_id=item.product_id, quantity=0)
+            balance.quantity += item.quantity
+            db.session.add(balance)
+        sales_return.status = "completed"
+        db.session.commit()
+        flash("Возврат проведён и учтён в остатках", "success")
+    return redirect(url_for("main.returns"))
 
 
 def order_payload(order):
-    return {"number": order.number, "external_id": order.external_id, "status": order.status, "created_at": order.created_at.isoformat(), "customer": {"id": order.customer.id, "name": order.customer.name, "address": order.customer.address}, "representative": {"id": order.representative.id, "name": order.representative.full_name}, "total_amount": float(order.total_amount), "items": [{"barcode": item.product.barcode, "name": item.product.name, "quantity": float(item.quantity), "price": float(item.price)} for item in order.items]}
+    counterparty = order.customer.counterparty
+    return {"number": order.number, "external_id": order.external_id, "status": order.status, "created_at": order.created_at.isoformat(), "customer": {"id": order.customer.id, "name": order.customer.name, "address": order.customer.address}, "counterparty": {"external_id": counterparty.external_id, "name": counterparty.name, "tax_id": counterparty.tax_id} if counterparty else None, "representative": {"id": order.representative.id, "name": order.representative.full_name}, "total_amount": float(order.total_amount), "items": [{"external_id": item.product.external_id, "barcode": item.product.barcode, "name": item.product.name, "quantity": float(item.quantity), "price": float(item.price)} for item in order.items]}
 
 
 @api.route("/health")
@@ -528,7 +804,128 @@ def api_health():
 @api.route("/products")
 @one_c_required
 def api_products():
-    return jsonify(items=[{"barcode": p.barcode, "name": p.name, "price": float(p.price), "stock": float(p.stock_qty)} for p in Product.query.filter_by(is_active=True).all()])
+    selected_group = setting("one_c_product_group_id")
+    query = Product.query.filter_by(is_active=True)
+    if selected_group:
+        query = query.filter_by(external_group_id=selected_group)
+    return jsonify(items=[{"external_id": p.external_id, "group_id": p.external_group_id, "barcode": p.barcode, "name": p.name, "unit": p.unit, "type": p.product_type, "price": float(p.price), "cost": float(p.calculated_cost), "stock": float(p.stock_qty)} for p in query.all()])
+
+
+@api.route("/catalog", methods=["POST"])
+@one_c_required
+def api_catalog():
+    payload = request.get_json(silent=True) or {}
+    group_id = str(payload.get("group_id") or "").strip()
+    selected_group = setting("one_c_product_group_id")
+    if selected_group and group_id != selected_group:
+        return jsonify(error="Передана не настроенная группа номенклатуры", expected_group_id=selected_group), 400
+    rows = payload.get("items")
+    if not isinstance(rows, list):
+        return jsonify(error="Ожидается массив items"), 400
+    updated = 0
+    received_ids = set()
+    for row in rows:
+        external_id = str(row.get("external_id") or "").strip()
+        barcode = barcode_value(row.get("barcode"))
+        name = str(row.get("name") or "").strip()
+        if not external_id or not barcode or not name:
+            continue
+        product = Product.query.filter((Product.external_id == external_id) | (Product.barcode == barcode)).first() or Product(barcode=barcode)
+        product.external_id, product.external_group_id, product.barcode, product.name = external_id, group_id, barcode, name
+        product.unit = str(row.get("unit") or "шт").strip()
+        product.product_type = str(row.get("type") or "finished").strip() if str(row.get("type") or "finished") in {"raw", "semi_finished", "finished", "packaging"} else "finished"
+        product.shelf_life_days = int(row["shelf_life_days"]) if row.get("shelf_life_days") not in (None, "") else None
+        product.allergens = str(row.get("allergens") or "").strip() or None
+        product.calculated_cost = decimal_value(row.get("cost"), product.calculated_cost)
+        product.price = decimal_value(row.get("price"), product.price)
+        product.is_active = True
+        db.session.add(product)
+        received_ids.add(external_id)
+        updated += 1
+    if payload.get("full_sync") and group_id:
+        Product.query.filter(Product.external_group_id == group_id, Product.external_id.notin_(received_ids or {""})).update({Product.is_active: False}, synchronize_session=False)
+    db.session.add(SyncLog(source="1c_catalog", status="success", items_count=updated, message=f"Группа {group_id}"))
+    db.session.commit()
+    return jsonify(ok=True, updated=updated, group_id=group_id)
+
+
+@api.route("/counterparties", methods=["POST"])
+@one_c_required
+def api_counterparties():
+    rows = (request.get_json(silent=True) or {}).get("items")
+    if not isinstance(rows, list):
+        return jsonify(error="Ожидается массив items"), 400
+    updated = 0
+    for item in rows:
+        external_id = str(item.get("external_id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not external_id or not name:
+            continue
+        row = Counterparty.query.filter_by(external_id=external_id).first() or Counterparty(external_id=external_id)
+        row.name, row.tax_id = name, str(item.get("tax_id") or "").strip() or None
+        row.registration_code = str(item.get("registration_code") or "").strip() or None
+        row.legal_address, row.phone, row.email = str(item.get("address") or "").strip() or None, str(item.get("phone") or "").strip() or None, str(item.get("email") or "").strip() or None
+        row.debt, row.is_active = decimal_value(item.get("debt")), bool(item.get("is_active", True))
+        price_type_external_id = str(item.get("price_type_external_id") or "").strip()
+        if price_type_external_id:
+            price_type = PriceType.query.filter_by(external_id=price_type_external_id).first()
+            if price_type:
+                row.price_type_id = price_type.id
+        db.session.add(row)
+        updated += 1
+    db.session.add(SyncLog(source="1c_counterparties", status="success", items_count=updated))
+    db.session.commit()
+    return jsonify(ok=True, updated=updated)
+
+
+@api.route("/prices", methods=["POST"])
+@one_c_required
+def api_prices():
+    payload = request.get_json(silent=True) or {}
+    types = payload.get("price_types", [])
+    prices = payload.get("prices", [])
+    if not isinstance(types, list) or not isinstance(prices, list):
+        return jsonify(error="Ожидаются массивы price_types и prices"), 400
+    for item in types:
+        external_id, name = str(item.get("external_id") or "").strip(), str(item.get("name") or "").strip()
+        if not external_id or not name:
+            continue
+        row = PriceType.query.filter_by(external_id=external_id).first() or PriceType(external_id=external_id, name=name)
+        row.name, row.is_active = name, bool(item.get("is_active", True))
+        db.session.add(row)
+    db.session.flush()
+    updated = 0
+    for item in prices:
+        product = Product.query.filter_by(external_id=str(item.get("product_external_id") or "").strip()).first()
+        price_type = PriceType.query.filter_by(external_id=str(item.get("price_type_external_id") or "").strip()).first()
+        if not product or not price_type:
+            continue
+        row = ProductPrice.query.filter_by(product_id=product.id, price_type_id=price_type.id).first() or ProductPrice(product_id=product.id, price_type_id=price_type.id)
+        row.price = max(decimal_value(item.get("price")), 0)
+        db.session.add(row)
+        updated += 1
+    db.session.add(SyncLog(source="1c_prices", status="success", items_count=updated))
+    db.session.commit()
+    return jsonify(ok=True, updated=updated, price_types=len(types))
+
+
+@api.route("/warehouses", methods=["POST"])
+@one_c_required
+def api_warehouses():
+    rows = (request.get_json(silent=True) or {}).get("items")
+    if not isinstance(rows, list):
+        return jsonify(error="Ожидается массив items"), 400
+    updated = 0
+    for item in rows:
+        external_id, name = str(item.get("external_id") or "").strip(), str(item.get("name") or "").strip()
+        if not external_id or not name:
+            continue
+        row = Warehouse.query.filter_by(external_id=external_id).first() or Warehouse(external_id=external_id, name=name)
+        row.name, row.warehouse_type, row.is_active = name, str(item.get("type") or "finished"), bool(item.get("is_active", True))
+        db.session.add(row)
+        updated += 1
+    db.session.commit()
+    return jsonify(ok=True, updated=updated)
 
 
 @api.route("/stocks", methods=["POST"])
@@ -544,10 +941,23 @@ def api_stocks():
         if not product:
             unknown.append(barcode)
             continue
-        product.stock_qty = decimal_value(item.get("quantity"))
+        quantity = decimal_value(item.get("quantity"))
+        warehouse_external_id = str(item.get("warehouse_external_id") or "").strip()
+        warehouse = Warehouse.query.filter_by(external_id=warehouse_external_id).first() if warehouse_external_id else None
+        if warehouse:
+            balance = StockBalance.query.filter_by(warehouse_id=warehouse.id, product_id=product.id).first() or StockBalance(warehouse_id=warehouse.id, product_id=product.id)
+            balance.quantity = quantity
+            db.session.add(balance)
+        else:
+            product.stock_qty = quantity
         if item.get("price") is not None:
             product.price = decimal_value(item.get("price"))
         updated += 1
+    db.session.flush()
+    for product in Product.query.all():
+        total = db.session.query(func.coalesce(func.sum(StockBalance.quantity), 0)).filter_by(product_id=product.id).scalar()
+        if total:
+            product.stock_qty = total
     db.session.add(SyncLog(source="1c_stock", status="success", items_count=updated, message=f"Не найдено: {len(unknown)}"))
     db.session.commit()
     return jsonify(ok=True, updated=updated, unknown_barcodes=unknown)
@@ -594,3 +1004,27 @@ def api_orders_ack():
 @one_c_required
 def api_order_statuses():
     return api_orders_ack()
+
+
+@api.route("/returns")
+@one_c_required
+def api_returns():
+    rows = SalesReturn.query.filter_by(status="completed", synced_at=None).order_by(SalesReturn.created_at).limit(500).all()
+    return jsonify(items=[{"number": row.number, "external_id": row.external_id, "counterparty_external_id": row.counterparty.external_id, "warehouse_external_id": row.warehouse.external_id, "reason": row.reason, "total_amount": float(row.total_amount), "items": [{"barcode": item.product.barcode, "quantity": float(item.quantity), "price": float(item.price)} for item in row.items]} for row in rows])
+
+
+@api.route("/returns/ack", methods=["POST"])
+@one_c_required
+def api_returns_ack():
+    rows = (request.get_json(silent=True) or {}).get("returns")
+    if not isinstance(rows, list):
+        return jsonify(error="Ожидается массив returns"), 400
+    updated = 0
+    for item in rows:
+        row = SalesReturn.query.filter_by(number=str(item.get("number") or "")).first()
+        if row:
+            row.external_id = str(item.get("external_id") or "").strip() or row.external_id
+            row.synced_at = datetime.utcnow()
+            updated += 1
+    db.session.commit()
+    return jsonify(ok=True, updated=updated)

@@ -2,6 +2,8 @@ const STATIC_CACHE = "sinana-static-v1";
 const ASSETS = [
   "/static/css/app.css",
   "/static/css/layout.css",
+  "/static/css/erp.css",
+  "/static/css/team.css",
   "/static/js/app.js",
   "/static/brand/sinana-monogram.png",
   "/static/brand/sinana-wordmark.png",
